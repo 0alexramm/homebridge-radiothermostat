@@ -4,9 +4,15 @@
   "description": "Radiothermostat Homebridge Plugin",
   "license": "ISC",
   "keywords": [
-    "homebridge-plugin"
+    "homebridge-plugin",
+    "radiothermostat"
   ],
   "author": "Alexander Ramm <npm@ramm.us>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0alexramm/homebridge-radiothermostat.git"
+  },
+  "homepage": "https://github.com/0alexramm/homebridge-radiothermostat#readme",
   "main": "dist/index.js",
   "files": [
     "dist"
