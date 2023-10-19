@@ -1,33 +1,74 @@
 import {AccessoryConfig, AccessoryPlugin, API, Characteristic, CharacteristicValue, Logging, Service} from 'homebridge';
 
+interface ThermostatConfig extends AccessoryConfig {
+    base_url?: string;
+    min_poll_interval?: number;
+    enable_fan_interface?: boolean;
+}
 export class Radiothermostat implements AccessoryPlugin {
     private readonly service: Service;
+    private readonly informationService: Service;
+    private readonly fanService?: Service;
     private readonly Characteristic: typeof Characteristic;
     private lastGetStateTime = new Date(0);
     private getStateCache: any;
     private getStateInProgress = false;
+    private model?: string;
+    private sysInfo?: {serialNumber: string, firmware: string};
+
 
     constructor(
         private readonly log: Logging,
-        private readonly config: AccessoryConfig,
+        private readonly config: ThermostatConfig,
         private readonly api: API,
     ) {
-        // TODO Fan service and humidity sensor service
-        this.service = new this.api.hap.Service(config.name, this.api.hap.Service.Thermostat.UUID);
-        this.Characteristic = this.api.hap.Characteristic;
+        // config defaults and checks
+        if (config.base_url === undefined) {
+            this.log.error(`"base_url" must be defined in the config`);
+            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+        if (config.min_poll_interval === undefined) {
+            config.min_poll_interval = 5000;
+        } else if (config.min_poll_interval < 3000) {
+            config.min_poll_interval = 3000;
+        } else if (config.min_poll_interval > 15000) {
+            config.min_poll_interval = 15000;
+        }
 
+        if (config.enable_fan_interface === undefined) {
+            config.enable_fan_interface = false;
+        }
+
+        this.Characteristic = this.api.hap.Characteristic;
+        this.informationService = new this.api.hap.Service.AccessoryInformation();
+        this.service = new this.api.hap.Service(config.name, this.api.hap.Service.Thermostat.UUID);
+        if (config.enable_fan_interface === true) {
+            this.fanService = new this.api.hap.Service(config.name + ' Fan', this.api.hap.Service.Fanv2.UUID);
+        }
+
+        // AccessoryInformation Service
+        this.informationService.setCharacteristic(this.Characteristic.Manufacturer, 'Radiothermostat');
+        this.informationService.getCharacteristic(this.Characteristic.Model)
+            .onGet(this.onGetModel.bind(this));
+        this.informationService.getCharacteristic(this.Characteristic.SerialNumber)
+            .onGet(this.onGetSerialNumber.bind(this));
+        this.informationService.getCharacteristic(this.Characteristic.FirmwareRevision)
+            .onGet(this.onGetFirmware.bind(this));
+
+        // Thermostat Service
         this.service.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(this.onCurrentHeatingCoolingStateGet.bind(this));
 
         this.service.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
             .onGet(this.onTargetHeatingCoolingStateGet.bind(this))
             .onSet(this.onTargetHeatingCoolingStateSet.bind(this))
-            .setProps({ // disable auto
+            .setProps({ // TODO: for now, AUTO is disabled as it's unclear how to set a target temp for that mode
                 validValues: [
                     this.Characteristic.TargetHeatingCoolingState.OFF,
                     this.Characteristic.TargetHeatingCoolingState.HEAT,
-                    this.Characteristic.TargetHeatingCoolingState.COOL]
-              });
+                    this.Characteristic.TargetHeatingCoolingState.COOL,
+                ],
+            });
 
         this.service.getCharacteristic(this.Characteristic.CurrentTemperature)
             .onGet(this.onCurrentTemperatureGet.bind(this));
@@ -39,19 +80,65 @@ export class Radiothermostat implements AccessoryPlugin {
         this.service.getCharacteristic(this.Characteristic.TemperatureDisplayUnits)
             .onGet(this.onTemperatureDisplayUnitsGet.bind(this))
             .onSet(this.onTemperatureDisplayUnitsSet.bind(this))
-            .setProps({ // disable Celsium
-                validValues: [this.Characteristic.TemperatureDisplayUnits.FAHRENHEIT]
+            .setProps({ // disable Celsius
+                validValues: [this.Characteristic.TemperatureDisplayUnits.FAHRENHEIT],
             });
 
+        // Fanv2 Service
+        this.fanService?.getCharacteristic(this.Characteristic.Active)
+            .onGet(this.onFanActiveGet.bind(this))
+            .onSet(this.onFanActiveSet.bind(this));
+
         this.log.debug('Finished initializing accessory:', this.config.name);
-    }
-    identify?(): void {
-        this.log('Identify!');
-    }
-    getServices(): Service[] {
-        return [this.service];
+        // fetch initial data async
+        this.getInfo();
+        this.getState();
+        this.registerHumidity(); // need to query device to check if supported
     }
 
+    getServices(): Service[] {
+        const services = [this.service, this.informationService];
+        if (this.fanService !== undefined) {
+            services.push(this.fanService);
+        }
+        return services;
+    }
+
+    // AccessoryInformation Service
+    private async onGetModel() {
+        if (this.model === undefined) {
+            try {
+                this.model = await this.request('/tstat/model').then((data) => data.model);
+            } catch (error) {
+                this.model = 'unknown';
+            }
+        }
+        return this.model as CharacteristicValue;
+    }
+
+    private async getInfo() {
+        if (this.sysInfo === undefined) {
+            try {
+                const sysInfo = await this.request('/sys');
+                this.sysInfo = {serialNumber: sysInfo.uuid, firmware: sysInfo.fw_version};
+            } catch (error) {
+                this.sysInfo = {serialNumber: 'unknown', firmware: 'unknown'};
+            }
+        }
+        return this.sysInfo;
+    }
+
+    private async onGetSerialNumber() {
+        const sysInfo = await this.getInfo();
+        return sysInfo.serialNumber as CharacteristicValue;
+    }
+
+    private async onGetFirmware() {
+        const sysInfo = await this.getInfo();
+        return sysInfo.firmware as CharacteristicValue;
+    }
+
+    // Thermostat Service
     private fahrenheitToCelsius(fahrenheit: number) {
         return (fahrenheit - 32) * 5/9;
     }
@@ -74,7 +161,8 @@ export class Radiothermostat implements AccessoryPlugin {
             await new Promise((resolve) => setTimeout(resolve, 500));
         }
         const currentTime = new Date();
-        if (currentTime.getTime() - this.lastGetStateTime.getTime() > 5000) {// new query if data are older than 5 sec
+        // new query if data are older than specified (5 sec default)
+        if (currentTime.getTime() - this.lastGetStateTime.getTime() > this.config?.min_poll_interval! ) {
             this.getStateInProgress = true;
             try {
                 this.getStateCache = await this.request('/tstat');
@@ -93,16 +181,18 @@ export class Radiothermostat implements AccessoryPlugin {
     private async onCurrentHeatingCoolingStateGet() {
         const currentState = await this.getState().then((data) => data.tstate);
         this.log.debug('onCurrentHeatingCoolingStateGet:', currentState);
-        // if state is auto, set it to heat if temp < 65, cool if temp > 85, off otherwise
+        // tstate is "HVAC Operating State". Can be: 0 - OFF, 1 - HEAT, 2 -COOL
         return currentState as CharacteristicValue;
     }
 
     private async onTargetHeatingCoolingStateGet() {
         const state = await this.getState();
         this.log.debug('onTargetHeatingCoolingStateGet:', state.tmode);
-        // if target state is auto in the device, set it to heat if temp < 65,
-        // cool if temp > 85, off otherwise
-        if(state.tmode == this.Characteristic.TargetHeatingCoolingState.AUTO) {
+        // it seems there is no way to change target temp when thermostat
+        // was set to AUTO on the device itself (tmode is 3)
+        // if target state is auto, set it to heat if current temp < 60,
+        // cool if current temp > 85, off otherwise
+        if (state.tmode == this.Characteristic.TargetHeatingCoolingState.AUTO) {
             if (state.temp < 60) state.tmode = this.Characteristic.TargetHeatingCoolingState.HEAT;
             if (state.temp > 85) state.tmode = this.Characteristic.TargetHeatingCoolingState.COOL;
             else state.tmode = this.Characteristic.TargetHeatingCoolingState.OFF;
@@ -167,5 +257,32 @@ export class Radiothermostat implements AccessoryPlugin {
 
     private onTemperatureDisplayUnitsSet(value: any) {
         this.log.debug('onTemperatureDisplayUnitsSet:', value);
+    }
+
+    private async registerHumidity() {
+        const humidity = await this.onCurrentRelativeHumidityGet();
+        if (humidity as number >= 0) {
+            this.service.getCharacteristic(this.Characteristic.CurrentRelativeHumidity)
+                .onGet(this.onCurrentRelativeHumidityGet.bind(this));
+        }
+    }
+
+    private async onCurrentRelativeHumidityGet() {
+        const humidity = this.model = await this.request('/tstat/humidity').then((data) => data.humidity);
+        this.log.debug('onCurrentRelativeHumidityGet:', humidity);
+        return humidity as CharacteristicValue;
+    }
+
+    private async onFanActiveGet() {
+        const state = await this.getState();
+
+        this.log.debug('onFanActiveGet:', state.fstate );
+        return state.fstate as CharacteristicValue;
+    }
+
+    private async onFanActiveSet(active: any) {
+        this.log.debug('onFanActiveSet:', active);
+        const fmode = (active == this.Characteristic.Active.INACTIVE) ? 0 : 2;
+        await this.request('/tstat', 'POST', `{"fmode": ${fmode}}`);
     }
 }
