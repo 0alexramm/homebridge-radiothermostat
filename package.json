@@ -1,6 +1,6 @@
 {
   "name": "homebridge-radiothermostat-ar",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Radiothermostat Homebridge Plugin",
   "license": "ISC",
   "keywords": [

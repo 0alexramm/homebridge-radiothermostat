@@ -94,6 +94,9 @@ export class Radiothermostat implements AccessoryPlugin {
         this.getInfo();
         this.getState();
         this.registerHumidity(); // need to query device to check if supported
+        if (this.fanService !== undefined) {
+            setInterval(this.updateFanState.bind(this), 15000); // update Fan state to use as automation event
+        }
     }
 
     getServices(): Service[] {
@@ -284,5 +287,11 @@ export class Radiothermostat implements AccessoryPlugin {
         this.log.debug('onFanActiveSet:', active);
         const fmode = (active == this.Characteristic.Active.INACTIVE) ? 0 : 2;
         await this.request('/tstat', 'POST', `{"fmode": ${fmode}}`);
+    }
+
+    private async updateFanState() {
+        const state = await this.getState();
+        this.log.debug('updateFanState:', state.fstate);
+        this.fanService?.getCharacteristic(this.Characteristic.Active).updateValue(state.fstate);
     }
 }

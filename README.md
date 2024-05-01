@@ -13,7 +13,7 @@ Install this plugin using: npm install -g homebridge-radiothermostat-ar
 - "name" - Accessory name to show in the UI. Required.
 - "base_url" - Url of the thermostat. Required.
 - "min_poll_interval" - Throttle network requests to the thermostat to one per specified interval value in milliseconds. Default value is 5000 (5 sec). Min 3000, max 15000. Optional.
-- "enable_fan_interface" - Adds fan on/auto control. Default value is false. Optional.
+- "enable_fan_interface" - Adds fan on/auto control. Default value is false. Optional. If enabled, thermostat's Fan sate can be used to trigger automation.
 
 ### Configuration sample
 
